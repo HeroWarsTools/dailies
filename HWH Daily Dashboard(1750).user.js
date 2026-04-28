@@ -3,7 +3,7 @@
 // @name:en          HWH Daily Dashboard
 // @name:ru          HWH Ежедневная панель
 // @namespace        HWH_DailyDashboard
-// @version          1.14.0
+// @version          1.14.1
 // @description      Ultimate daily dashboard: Auto-run, Smart Energy Loop, Item Exchange, and Forensic Activity Check with Retry Loop.
 // @author           HWH Extension Architect
 // @match            https://www.hero-wars.com/*
@@ -32,7 +32,7 @@
         const { othersPopupButtons } = HWHData;
         const { popup, setProgress, I18N, getSaveVal, setSaveVal } = HWHFuncs;
 
-        console.log('%c[HWH Daily Dashboard] Script initialized (v1.14.0).', 'color: #00bcd4; font-weight: bold;');
+        console.log('%c[HWH Daily Dashboard] Script initialized (v1.14.1).', 'color: #00bcd4; font-weight: bold;');
 
         // @AI-HIGHLIGHT: Session variable to track if the popup has been opened at least once since page load (F5 resets this)
         let hasPopupOpenedThisSession = false;
@@ -128,6 +128,7 @@
                 seqSpend: document.getElementById('db_seq_spend').checked,
                 seqBuy: document.getElementById('db_seq_buy').checked,
                 seqGlyph: document.getElementById('db_seq_glyph').checked,
+                seqGlyphTimer: document.getElementById('db_seq_glyph_timer').checked,
                 seqExch: document.getElementById('db_seq_exch').checked
             }),
             run: () => {
@@ -143,7 +144,8 @@
                 allSettings.dailyDashboard = {
                     act: opt.checkActivity, gly: opt.checkGlyph, ref: opt.checkRefills, nrg: opt.checkCampaignEnergy,
                     autoDash: opt.autoDash, autoExec: opt.autoExec,
-                    seqSpend: opt.seqSpend, seqBuy: opt.seqBuy, seqGlyph: opt.seqGlyph, seqExch: opt.seqExch
+                    seqSpend: opt.seqSpend, seqBuy: opt.seqBuy, seqGlyph: opt.seqGlyph, 
+                    seqGlyphTimer: opt.seqGlyphTimer, seqExch: opt.seqExch
                 };
                 await extDB.set(userId, allSettings);
                 setProgress("Saved for Account / Сохранено для аккаунта", 3000);
@@ -159,6 +161,7 @@
                 GM_setValue('db_seq_spend', opt.seqSpend);
                 GM_setValue('db_seq_buy', opt.seqBuy);
                 GM_setValue('db_seq_glyph', opt.seqGlyph);
+                GM_setValue('db_seq_glyph_timer', opt.seqGlyphTimer);
                 GM_setValue('db_seq_exch', opt.seqExch);
                 setProgress("Defaults Saved / По умолчанию сохранено", 3000);
             },
@@ -211,7 +214,9 @@
                 SEQ_SPEND: '1 - Spend Energy',
                 SEQ_BUY: '2 - Buy Energy',
                 SEQ_GLYPH: '3 - Enchant a Glyph',
-                SEQ_EXCH: '4 - Item Exchange'
+                SEQ_GLYPH_TIMER: '3a - Glyph Timer (Safe Sync)',
+                SEQ_EXCH: '4 - Item Exchange',
+                WAIT_SYNC: 'Auto-Exec Paused: Waiting for Reset Sync'
             },
             ru: {
                 DASH_TITLE: 'Ежедневная панель',
@@ -246,7 +251,9 @@
                 SEQ_SPEND: '1 - Потратить энергию',
                 SEQ_BUY: '2 - Купить энергию',
                 SEQ_GLYPH: '3 - Зачаровать глиф',
-                SEQ_EXCH: '4 - Обмен предметов'
+                SEQ_GLYPH_TIMER: '3a - Таймер глифа (Синхронизация)',
+                SEQ_EXCH: '4 - Обмен предметов',
+                WAIT_SYNC: 'Авто-выполнение приостановлено: Ожидание синхронизации сброса'
             }
         };
 
@@ -292,7 +299,7 @@
 
                 const response = await Caller.send({
                     name: 'clanItemsForActivity',
-                    args: { items: { [activeItem.type]: { [activeItem.id]: countToExchange } } }
+                    args: { items: { [activeItem.type]: {[activeItem.id]: countToExchange } } }
                 });
 
                 setProgress(`${I18N('EXCHANGE_SUCCESS')} ${response}`, 5000);
@@ -319,7 +326,7 @@
         }
 
         async function performGlyphFix() {
-            const [heroes, inventory] = await Caller.send(['heroGetAll', 'inventoryGet']);
+            const[heroes, inventory] = await Caller.send(['heroGetAll', 'inventoryGet']);
             let availableRuneId = 0;
             for (let i = 1; i <= 4; i++) {
                 if (inventory.consumable && inventory.consumable[i] > 0) { availableRuneId = i; break; }
@@ -407,6 +414,33 @@
             if (options.autoExec) {
                 hasPopupOpenedThisSession = true; // Lock further auto-triggers
                 
+                // @AI-NOTE: Timezone Sync Check (Option B - Halt Entire Sequence)
+                // @AI-NOTE: RU: Проверка синхронизации часовых поясов (Вариант B - Остановка всей последовательности)
+                if (options.seqGlyphTimer && userInfo.nextDayTs) {
+                    const now = Math.floor(Date.now() / 1000);
+                    const H7 = 7 * 3600;
+                    const H14 = 14 * 3600;
+                    
+                    const timeToAccountReset = userInfo.nextDayTs - now;
+                    
+                    const date = new Date();
+                    let guildReset = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 2, 0, 0) / 1000;
+                    if (now >= guildReset) guildReset += 24 * 3600;
+                    const timeToGuildReset = guildReset - now;
+
+                    const accUnder7 = timeToAccountReset < H7;
+                    const guildUnder7 = timeToGuildReset < H7;
+                    const accUnder14 = timeToAccountReset < H14;
+                    const guildUnder14 = timeToGuildReset < H14;
+
+                    if ((accUnder7 && !guildUnder14) || (guildUnder7 && !accUnder14)) {
+                        console.warn('[HWH Dashboard] Auto-Exec halted: WAIT FOR RESET state detected (Account/Guild desync).');
+                        setProgress(I18N('WAIT_SYNC'), 4000);
+                        // @AI-NOTE: If you want Option A (skip only glyph), remove this 'return' and wrap only the 'seqGlyph' block below with this logic.
+                        return; 
+                    }
+                }
+
                 if (options.seqSpend && !campaignEnergyGreen && typeof unsafeWindow.HWH_CampAuto_API?.run === 'function') {
                     setProgress('Auto: ' + I18N('BTN_SPEND_ENERGY'), 2000);
                     unsafeWindow.HWH_CampAuto_API.run();
@@ -512,6 +546,7 @@
                 seqSpend: dbOpts?.seqSpend ?? GM_getValue('db_seq_spend', true),
                 seqBuy: dbOpts?.seqBuy ?? GM_getValue('db_seq_buy', false),
                 seqGlyph: dbOpts?.seqGlyph ?? GM_getValue('db_seq_glyph', false),
+                seqGlyphTimer: dbOpts?.seqGlyphTimer ?? GM_getValue('db_seq_glyph_timer', true),
                 seqExch: dbOpts?.seqExch ?? GM_getValue('db_seq_exch', false)
             };
 
@@ -530,6 +565,7 @@
                     <div style="margin-bottom: 5px;"><input type="checkbox" id="db_seq_spend" ${opt.seqSpend ? 'checked' : ''}> <label for="db_seq_spend">${I18N('SEQ_SPEND')}</label></div>
                     <div style="margin-bottom: 5px;"><input type="checkbox" id="db_seq_buy" ${opt.seqBuy ? 'checked' : ''}> <label for="db_seq_buy">${I18N('SEQ_BUY')}</label></div>
                     <div style="margin-bottom: 5px;"><input type="checkbox" id="db_seq_glyph" ${opt.seqGlyph ? 'checked' : ''}> <label for="db_seq_glyph">${I18N('SEQ_GLYPH')}</label></div>
+                    <div style="margin-bottom: 5px; margin-left: 20px;"><input type="checkbox" id="db_seq_glyph_timer" ${opt.seqGlyphTimer ? 'checked' : ''}> <label for="db_seq_glyph_timer" style="color: #bbb; font-size: 13px;">${I18N('SEQ_GLYPH_TIMER')}</label></div>
                     <div style="margin-bottom: 15px;"><input type="checkbox" id="db_seq_exch" ${opt.seqExch ? 'checked' : ''}> <label for="db_seq_exch">${I18N('SEQ_EXCH')}</label></div>
                     
                     <div style="display: flex; gap: 5px; margin-top: 15px;">
@@ -568,7 +604,7 @@
 
                 HWHData.buttons.dailyQuests = {
                     isCombine: true,
-                    combineList: [
+                    combineList:[
                         originalQuestConfig,
                         customSideButton
                     ]
@@ -633,6 +669,7 @@
                 seqSpend: dbOpts?.seqSpend ?? GM_getValue('db_seq_spend', true),
                 seqBuy: dbOpts?.seqBuy ?? GM_getValue('db_seq_buy', false),
                 seqGlyph: dbOpts?.seqGlyph ?? GM_getValue('db_seq_glyph', false),
+                seqGlyphTimer: dbOpts?.seqGlyphTimer ?? GM_getValue('db_seq_glyph_timer', true),
                 seqExch: dbOpts?.seqExch ?? GM_getValue('db_seq_exch', false)
             };
 
@@ -669,6 +706,7 @@
                     seqSpend: opt.seqSpend,
                     seqBuy: opt.seqBuy,
                     seqGlyph: opt.seqGlyph,
+                    seqGlyphTimer: opt.seqGlyphTimer,
                     seqExch: opt.seqExch
                 }, false);
 
