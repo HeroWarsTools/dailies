@@ -3,12 +3,14 @@
 // @name:en          HWH Daily Dashboard
 // @name:ru          HWH Ежедневная панель
 // @namespace        HWH_DailyDashboard
-// @version          1.12.0
+// @version          1.14.0
 // @description      Ultimate daily dashboard: Auto-run, Smart Energy Loop, Item Exchange, and Forensic Activity Check with Retry Loop.
 // @author           HWH Extension Architect
 // @match            https://www.hero-wars.com/*
 // @match            https://apps-1701433570146040.apps.fbsbx.com/*
 // @grant            unsafeWindow
+// @grant            GM_setValue
+// @grant            GM_getValue
 // @run-at           document-start
 // ==/UserScript==
 
@@ -30,10 +32,149 @@
         const { othersPopupButtons } = HWHData;
         const { popup, setProgress, I18N, getSaveVal, setSaveVal } = HWHFuncs;
 
-        console.log('%c[HWH Daily Dashboard] Script initialized (v1.12.0).', 'color: #00bcd4; font-weight: bold;');
+        console.log('%c[HWH Daily Dashboard] Script initialized (v1.14.0).', 'color: #00bcd4; font-weight: bold;');
 
         // @AI-HIGHLIGHT: Session variable to track if the popup has been opened at least once since page load (F5 resets this)
         let hasPopupOpenedThisSession = false;
+
+        // --- @SECTION: DB CLASS ---
+        class HWHExtensionDB {
+            constructor(dbName, storeName) {
+                this.dbName = dbName;
+                this.storeName = storeName;
+                this.db = null;
+            }
+            async open() {
+                return new Promise((resolve, reject) => {
+                    let request = indexedDB.open(this.dbName);
+                    request.onsuccess = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains(this.storeName)) {
+                            const version = db.version + 1;
+                            db.close();
+                            const upgradeReq = indexedDB.open(this.dbName, version);
+                            upgradeReq.onupgradeneeded = (evt) => {
+                                evt.target.result.createObjectStore(this.storeName);
+                            };
+                            upgradeReq.onsuccess = (evt) => {
+                                this.db = evt.target.result;
+                                resolve();
+                            };
+                            upgradeReq.onerror = (err) => reject(err);
+                        } else {
+                            this.db = db;
+                            resolve();
+                        }
+                    };
+                    request.onerror = (e) => reject(e);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains(this.storeName)) {
+                            db.createObjectStore(this.storeName);
+                        }
+                    };
+                });
+            }
+            async get(key, def) {
+                return new Promise(async (resolve) => {
+                    try {
+                        if (!this.db) await this.open();
+                        const transaction = this.db.transaction([this.storeName], 'readonly');
+                        const request = transaction.objectStore(this.storeName).get(key);
+                        request.onsuccess = () => resolve(request.result === undefined ? def : request.result);
+                        request.onerror = () => resolve(def);
+                    } catch (e) {
+                        resolve(def);
+                    }
+                });
+            }
+            async set(key, value) {
+                return new Promise(async (resolve, reject) => {
+                    try {
+                        if (!this.db) await this.open();
+                        const transaction = this.db.transaction([this.storeName], 'readwrite');
+                        const request = transaction.objectStore(this.storeName).put(value, key);
+                        transaction.oncomplete = () => resolve();
+                        transaction.onerror = (e) => reject(e);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            }
+        }
+        const extDB = new HWHExtensionDB('HeroWarsHelper', 'settings');
+
+        async function getUserId() {
+            const cached = HWHFuncs.getUserInfo();
+            if (cached && cached.id) return cached.id;
+            try {
+                const data = await Caller.send("userGetInfo");
+                return data?.id || 0;
+            } catch(e) {
+                return 0;
+            }
+        }
+
+        // --- @SECTION: API FOR UI ---
+        unsafeWindow.HWH_Dashboard_API = {
+            getUIOptions: () => ({
+                checkActivity: document.getElementById('db_act').checked,
+                checkGlyph: document.getElementById('db_gly').checked,
+                checkRefills: document.getElementById('db_ref').checked,
+                checkCampaignEnergy: document.getElementById('db_nrg').checked,
+                autoRun: document.getElementById('db_auto_dash').checked, // legacy mapping
+                autoDash: document.getElementById('db_auto_dash').checked,
+                autoExec: document.getElementById('db_auto_exec').checked,
+                seqSpend: document.getElementById('db_seq_spend').checked,
+                seqBuy: document.getElementById('db_seq_buy').checked,
+                seqGlyph: document.getElementById('db_seq_glyph').checked,
+                seqExch: document.getElementById('db_seq_exch').checked
+            }),
+            run: () => {
+                const opt = unsafeWindow.HWH_Dashboard_API.getUIOptions();
+                const btn = document.querySelector('.PopUp_closeBtn');
+                if(btn) btn.click();
+                runChecks(opt, true);
+            },
+            save: async () => {
+                const opt = unsafeWindow.HWH_Dashboard_API.getUIOptions();
+                const userId = await getUserId();
+                const allSettings = await extDB.get(userId, {});
+                allSettings.dailyDashboard = {
+                    act: opt.checkActivity, gly: opt.checkGlyph, ref: opt.checkRefills, nrg: opt.checkCampaignEnergy,
+                    autoDash: opt.autoDash, autoExec: opt.autoExec,
+                    seqSpend: opt.seqSpend, seqBuy: opt.seqBuy, seqGlyph: opt.seqGlyph, seqExch: opt.seqExch
+                };
+                await extDB.set(userId, allSettings);
+                setProgress("Saved for Account / Сохранено для аккаунта", 3000);
+            },
+            setDefault: () => {
+                const opt = unsafeWindow.HWH_Dashboard_API.getUIOptions();
+                GM_setValue('db_act', opt.checkActivity);
+                GM_setValue('db_gly', opt.checkGlyph);
+                GM_setValue('db_ref', opt.checkRefills);
+                GM_setValue('db_nrg', opt.checkCampaignEnergy);
+                GM_setValue('db_auto_dash', opt.autoDash);
+                GM_setValue('db_auto_exec', opt.autoExec);
+                GM_setValue('db_seq_spend', opt.seqSpend);
+                GM_setValue('db_seq_buy', opt.seqBuy);
+                GM_setValue('db_seq_glyph', opt.seqGlyph);
+                GM_setValue('db_seq_exch', opt.seqExch);
+                setProgress("Defaults Saved / По умолчанию сохранено", 3000);
+            },
+            loadDefault: async () => {
+                const userId = await getUserId();
+                const allSettings = await extDB.get(userId, {});
+                if (allSettings.dailyDashboard) {
+                    delete allSettings.dailyDashboard;
+                    await extDB.set(userId, allSettings);
+                }
+                setProgress("Defaults Loaded / Загружено по умолчанию", 3000);
+                const btn = document.querySelector('.PopUp_closeBtn');
+                if(btn) btn.click();
+                setTimeout(openDashboardPopup, 300);
+            }
+        };
 
         // --- @SECTION: I18N DATA ---
         const i18nData = {
@@ -44,13 +185,17 @@
                 LBL_GLYPH: 'Glyph Enchanted',
                 LBL_REFILLS: 'Energy Refills (50)',
                 LBL_ENERGY: 'Campaign Energy <= 120',
-                LBL_AUTO: 'Auto Run + Auto-Close',
+                LBL_AUTO_DASH: 'Auto Dashboard (Background Check)',
+                LBL_AUTO_EXEC: 'Auto Execute Sequence',
                 LBL_SHOW_BTN: 'Show "1750" Button',
                 BTN_RUN: 'Run Pre-Check',
                 BTN_FIX_GLYPH: 'Enchant Glyph',
                 BTN_FIX_REFILLS: 'Buy Energy (Loop)',
                 BTN_SPEND_ENERGY: 'Spend Energy (Monitor)',
                 BTN_EXCHANGE: 'Item Exchange',
+                BTN_SAVE_ACC: 'Save (Account)',
+                BTN_LOAD_DEF: 'Load Default',
+                BTN_SET_DEFAULT: 'Set as Default',
                 STATUS_OK: 'Condition met',
                 STATUS_NO: 'Condition NOT met',
                 ALL_MET: 'ALL CONDITIONS MET!',
@@ -61,7 +206,12 @@
                 EXCHANGE_ERROR: 'Exchange Error: Check console',
                 NO_ITEMS: 'No suitable items found (>200 qty, <4 val)',
                 QUEST_SETTINGS: 'Dashboard Button Settings',
-                QUEST_CONFIG: 'Dashboard Button Configuration'
+                QUEST_CONFIG: 'Dashboard Button Configuration',
+                SEQ_TITLE: 'Auto-Execution Sequence',
+                SEQ_SPEND: '1 - Spend Energy',
+                SEQ_BUY: '2 - Buy Energy',
+                SEQ_GLYPH: '3 - Enchant a Glyph',
+                SEQ_EXCH: '4 - Item Exchange'
             },
             ru: {
                 DASH_TITLE: 'Ежедневная панель',
@@ -70,13 +220,17 @@
                 LBL_GLYPH: 'Глиф зачарован',
                 LBL_REFILLS: 'Покупки энергии (50)',
                 LBL_ENERGY: 'Энергия кампании <= 120',
-                LBL_AUTO: 'Автозапуск + Автозакрытие',
+                LBL_AUTO_DASH: 'Авто-проверка панели',
+                LBL_AUTO_EXEC: 'Авто-выполнение последовательности',
                 LBL_SHOW_BTN: 'Показать кнопку "1750"',
                 BTN_RUN: 'Запустить проверку',
                 BTN_FIX_GLYPH: 'Зачаровать глиф',
                 BTN_FIX_REFILLS: 'Купить энергию (Цикл)',
                 BTN_SPEND_ENERGY: 'Потратить энергию (Монитор)',
                 BTN_EXCHANGE: 'Обмен предметов',
+                BTN_SAVE_ACC: 'Сохранить (Аккаунт)',
+                BTN_LOAD_DEF: 'Сбросить (По умолчанию)',
+                BTN_SET_DEFAULT: 'Сделать по умолчанию',
                 STATUS_OK: 'Условие выполнено',
                 STATUS_NO: 'Условие НЕ выполнено',
                 ALL_MET: 'ВСЕ УСЛОВИЯ ВЫПОЛНЕНЫ!',
@@ -87,7 +241,12 @@
                 EXCHANGE_ERROR: 'Ошибка обмена: проверьте консоль',
                 NO_ITEMS: 'Подходящие предметы не найдены (>200 шт, <4 ценность)',
                 QUEST_SETTINGS: 'Настройки кнопки панели',
-                QUEST_CONFIG: 'Конфигурация кнопки панели'
+                QUEST_CONFIG: 'Конфигурация кнопки панели',
+                SEQ_TITLE: 'Авто-выполнение (Последовательность)',
+                SEQ_SPEND: '1 - Потратить энергию',
+                SEQ_BUY: '2 - Купить энергию',
+                SEQ_GLYPH: '3 - Зачаровать глиф',
+                SEQ_EXCH: '4 - Обмен предметов'
             }
         };
 
@@ -245,6 +404,43 @@
             const campaignEnergyGreen = !options.checkCampaignEnergy || (currentEnergy <= 120);
             const allMet = activityGreen && glyphGreen && refillGreen && campaignEnergyGreen;
 
+            if (options.autoExec) {
+                hasPopupOpenedThisSession = true; // Lock further auto-triggers
+                
+                if (options.seqSpend && !campaignEnergyGreen && typeof unsafeWindow.HWH_CampAuto_API?.run === 'function') {
+                    setProgress('Auto: ' + I18N('BTN_SPEND_ENERGY'), 2000);
+                    unsafeWindow.HWH_CampAuto_API.run();
+                    monitorEnergyAndRecheck(options);
+                    return;
+                }
+                
+                if (options.seqBuy && !refillGreen) {
+                    setProgress('Auto: ' + I18N('BTN_FIX_REFILLS'), 2000);
+                    performEnergyLoop().then(() => {
+                        setProgress(I18N('WAIT_RECHECK'), 1000);
+                        setTimeout(() => runChecks(options, true), 1000);
+                    });
+                    return;
+                }
+                
+                if (options.seqGlyph && !glyphGreen) {
+                    setProgress('Auto: ' + I18N('BTN_FIX_GLYPH'), 2000);
+                    performGlyphFix().then(() => {
+                        setProgress(I18N('WAIT_RECHECK'), 1000);
+                        setTimeout(() => runChecks(options, true), 1000);
+                    });
+                    return;
+                }
+                
+                if (options.seqExch && allMet && totalActivity < 1750) {
+                    setProgress('Auto: ' + I18N('BTN_EXCHANGE'), 2000);
+                    performItemExchange(1750 - totalActivity).then(() => {
+                        setTimeout(() => runChecks(options, true), 1000);
+                    });
+                    return;
+                }
+            }
+
             setProgress([
                 `Activity: ${totalActivity} / 1750`,
                 `Glyph: ${glyphAvailable ? 'Available' : 'Done'}`,
@@ -302,12 +498,21 @@
             // @AI-HIGHLIGHT: Mark as opened if user manually clicks the menu button
             hasPopupOpenedThisSession = true;
 
+            const userId = await getUserId();
+            const allSettings = await extDB.get(userId, {});
+            const dbOpts = allSettings.dailyDashboard || null;
+
             const opt = {
-                act: getSaveVal('db_act', true),
-                gly: getSaveVal('db_gly', true),
-                ref: getSaveVal('db_ref', true),
-                nrg: getSaveVal('db_nrg', true),
-                auto: getSaveVal('db_auto', true)
+                act: dbOpts?.act ?? GM_getValue('db_act', true),
+                gly: dbOpts?.gly ?? GM_getValue('db_gly', true),
+                ref: dbOpts?.ref ?? GM_getValue('db_ref', true),
+                nrg: dbOpts?.nrg ?? GM_getValue('db_nrg', true),
+                autoDash: dbOpts?.autoDash ?? GM_getValue('db_auto_dash', false),
+                autoExec: dbOpts?.autoExec ?? GM_getValue('db_auto_exec', false),
+                seqSpend: dbOpts?.seqSpend ?? GM_getValue('db_seq_spend', true),
+                seqBuy: dbOpts?.seqBuy ?? GM_getValue('db_seq_buy', false),
+                seqGlyph: dbOpts?.seqGlyph ?? GM_getValue('db_seq_glyph', false),
+                seqExch: dbOpts?.seqExch ?? GM_getValue('db_seq_exch', false)
             };
 
             const contentHTML = `
@@ -318,30 +523,27 @@
                     <div style="margin-bottom: 10px;"><input type="checkbox" id="db_ref" ${opt.ref ? 'checked' : ''}> <label for="db_ref">${I18N('LBL_REFILLS')}</label></div>
                     <div style="margin-bottom: 10px;"><input type="checkbox" id="db_nrg" ${opt.nrg ? 'checked' : ''}> <label for="db_nrg">${I18N('LBL_ENERGY')}</label></div>
                     <hr style="border-color: #555;">
-                    <div style="margin-bottom: 10px;"><input type="checkbox" id="db_auto" ${opt.auto ? 'checked' : ''}> <label for="db_auto"><b>${I18N('LBL_AUTO')}</b></label></div>
+                    <div style="margin-bottom: 10px;"><input type="checkbox" id="db_auto_dash" ${opt.autoDash ? 'checked' : ''}> <label for="db_auto_dash"><b>${I18N('LBL_AUTO_DASH')}</b></label></div>
+                    <div style="margin-bottom: 10px;"><input type="checkbox" id="db_auto_exec" ${opt.autoExec ? 'checked' : ''}> <label for="db_auto_exec"><b>${I18N('LBL_AUTO_EXEC')}</b></label></div>
+                    <hr style="border-color: #555;">
+                    <div style="text-align: center; color: #fde5b6; margin-bottom: 10px;"><b>${I18N('SEQ_TITLE')}</b></div>
+                    <div style="margin-bottom: 5px;"><input type="checkbox" id="db_seq_spend" ${opt.seqSpend ? 'checked' : ''}> <label for="db_seq_spend">${I18N('SEQ_SPEND')}</label></div>
+                    <div style="margin-bottom: 5px;"><input type="checkbox" id="db_seq_buy" ${opt.seqBuy ? 'checked' : ''}> <label for="db_seq_buy">${I18N('SEQ_BUY')}</label></div>
+                    <div style="margin-bottom: 5px;"><input type="checkbox" id="db_seq_glyph" ${opt.seqGlyph ? 'checked' : ''}> <label for="db_seq_glyph">${I18N('SEQ_GLYPH')}</label></div>
+                    <div style="margin-bottom: 15px;"><input type="checkbox" id="db_seq_exch" ${opt.seqExch ? 'checked' : ''}> <label for="db_seq_exch">${I18N('SEQ_EXCH')}</label></div>
+                    
+                    <div style="display: flex; gap: 5px; margin-top: 15px;">
+                        <div onclick="HWH_Dashboard_API.run()" class="PopUp_btnGap green" style="flex: 1; cursor: pointer; padding: 3px;"><div class="PopUp_btnPlate" style="font-weight: bold; padding: 5px 0;">${I18N('BTN_RUN')}</div></div>
+                        <div onclick="HWH_Dashboard_API.save()" class="PopUp_btnGap blue" style="flex: 1; cursor: pointer; padding: 3px;"><div class="PopUp_btnPlate" style="font-weight: bold; padding: 5px 0;">${I18N('BTN_SAVE_ACC')}</div></div>
+                    </div>
+                    <div style="display: flex; gap: 5px; margin-top: 5px;">
+                        <div onclick="HWH_Dashboard_API.setDefault()" class="PopUp_btnGap violet" style="flex: 1; cursor: pointer; padding: 3px;"><div class="PopUp_btnPlate" style="font-weight: bold; padding: 5px 0; font-size: 12px;">${I18N('BTN_SET_DEFAULT')}</div></div>
+                        <div onclick="HWH_Dashboard_API.loadDefault()" class="PopUp_btnGap red" style="flex: 1; cursor: pointer; padding: 3px;"><div class="PopUp_btnPlate" style="font-weight: bold; padding: 5px 0; font-size: 12px;">${I18N('BTN_LOAD_DEF')}</div></div>
+                    </div>
                 </div>
             `;
 
             const answer = await popup.confirm(contentHTML,[
-                {
-                    msg: I18N('BTN_RUN'), color: 'green',
-                    result: () => {
-                        const newOpt = {
-                            checkActivity: document.getElementById('db_act').checked,
-                            checkGlyph: document.getElementById('db_gly').checked,
-                            checkRefills: document.getElementById('db_ref').checked,
-                            checkCampaignEnergy: document.getElementById('db_nrg').checked,
-                            autoRun: document.getElementById('db_auto').checked
-                        };
-                        setSaveVal('db_act', newOpt.checkActivity);
-                        setSaveVal('db_gly', newOpt.checkGlyph);
-                        setSaveVal('db_ref', newOpt.checkRefills);
-                        setSaveVal('db_nrg', newOpt.checkCampaignEnergy);
-                        setSaveVal('db_auto', newOpt.autoRun);
-                        runChecks(newOpt, true);
-                    }
-                },
-                { msg: 'Cancel', color: 'red', result: false },
                 { result: false, isClose: true }
             ]);
             if (typeof answer === 'function') answer();
@@ -352,8 +554,8 @@
             originalQuestConfig = { ...HWHData.buttons.dailyQuests };
         }
 
-        // 2. Load saved state
-        let isButtonEnabled = localStorage.getItem('hwh_custom_quest_btn_enabled') === 'true';
+        // 2. Load saved state using GM_getValue
+        let isButtonEnabled = GM_getValue('hwh_custom_quest_btn_enabled', true);
 
         const syncQuestButton = () => {
             if (isButtonEnabled) {
@@ -392,7 +594,7 @@
                 if (answer) {
                     const newState = popup.getCheckBoxes().find(c => c.name === 'toggle_btn').checked;
                     isButtonEnabled = newState;
-                    localStorage.setItem('hwh_custom_quest_btn_enabled', newState);
+                    GM_setValue('hwh_custom_quest_btn_enabled', newState);
                     syncQuestButton();
                     HWHFuncs.setProgress("Settings Saved / Настройки сохранены", true);
                 }
@@ -407,61 +609,86 @@
         });
 
         // @AI-HIGHLIGHT: New Auto-Run Logic (5s initial delay + 5 retries every 2s)
-        if (getSaveVal('db_auto', true)) {
-            let autoRunAttempts = 0;
-            let autoRunInterval = null;
+        let autoRunAttempts = 0;
+        let autoRunInterval = null;
 
-            const executeAutoCheckTick = async () => {
-                // Stop if the popup was already opened by the user or a previous tick
-                if (hasPopupOpenedThisSession) {
+        const executeAutoCheckTick = async () => {
+            // Stop if the popup was already opened by the user or a previous tick
+            if (hasPopupOpenedThisSession) {
+                if (autoRunInterval) clearInterval(autoRunInterval);
+                return;
+            }
+
+            const userId = await getUserId();
+            const allSettings = await extDB.get(userId, {});
+            const dbOpts = allSettings.dailyDashboard || null;
+            
+            const opt = {
+                act: dbOpts?.act ?? GM_getValue('db_act', true),
+                gly: dbOpts?.gly ?? GM_getValue('db_gly', true),
+                ref: dbOpts?.ref ?? GM_getValue('db_ref', true),
+                nrg: dbOpts?.nrg ?? GM_getValue('db_nrg', true),
+                autoDash: dbOpts?.autoDash ?? GM_getValue('db_auto_dash', false),
+                autoExec: dbOpts?.autoExec ?? GM_getValue('db_auto_exec', false),
+                seqSpend: dbOpts?.seqSpend ?? GM_getValue('db_seq_spend', true),
+                seqBuy: dbOpts?.seqBuy ?? GM_getValue('db_seq_buy', false),
+                seqGlyph: dbOpts?.seqGlyph ?? GM_getValue('db_seq_glyph', false),
+                seqExch: dbOpts?.seqExch ?? GM_getValue('db_seq_exch', false)
+            };
+
+            if (!opt.autoDash) {
+                if (autoRunInterval) clearInterval(autoRunInterval);
+                return;
+            }
+
+            try {
+                const quests = await Caller.send('questGetAll');
+                const activityQuest = quests.find(q => q.id >= 10047 && q.id <= 10050);
+                const totalActivity = activityQuest ? activityQuest.progress : 1750;
+
+                // Stop if activity is already completed
+                if (totalActivity >= 1750) {
+                    console.log('[HWH Dashboard] Auto-run: Activity 1750+. Stopping retry sequence.');
                     if (autoRunInterval) clearInterval(autoRunInterval);
                     return;
                 }
 
-                try {
-                    const quests = await Caller.send('questGetAll');
-                    const activityQuest = quests.find(q => q.id >= 10047 && q.id <= 10050);
-                    const totalActivity = activityQuest ? activityQuest.progress : 1750;
+                console.log(`[HWH Dashboard] Auto-run attempt ${autoRunAttempts + 1} firing...`);
 
-                    // Stop if activity is already completed
-                    if (totalActivity >= 1750) {
-                        console.log('[HWH Dashboard] Auto-run: Activity 1750+. Stopping retry sequence.');
-                        if (autoRunInterval) clearInterval(autoRunInterval);
-                        return;
-                    }
+                // Lock immediately to prevent the next interval from firing while API is resolving
+                hasPopupOpenedThisSession = true;
+                if (autoRunInterval) clearInterval(autoRunInterval);
 
-                    console.log(`[HWH Dashboard] Auto-run attempt ${autoRunAttempts + 1} firing...`);
+                runChecks({
+                    checkActivity: opt.act,
+                    checkGlyph: opt.gly,
+                    checkRefills: opt.ref,
+                    checkCampaignEnergy: opt.nrg,
+                    autoRun: opt.autoDash,
+                    autoExec: opt.autoExec,
+                    seqSpend: opt.seqSpend,
+                    seqBuy: opt.seqBuy,
+                    seqGlyph: opt.seqGlyph,
+                    seqExch: opt.seqExch
+                }, false);
 
-                    // Lock immediately to prevent the next interval from firing while API is resolving
-                    hasPopupOpenedThisSession = true;
-                    if (autoRunInterval) clearInterval(autoRunInterval);
+            } catch (err) {
+                console.warn(`[HWH Dashboard] Auto-run attempt ${autoRunAttempts + 1} failed (API not ready). Retrying...`);
+            }
+        };
 
-                    runChecks({
-                        checkActivity: getSaveVal('db_act', true),
-                        checkGlyph: getSaveVal('db_gly', true),
-                        checkRefills: getSaveVal('db_ref', true),
-                        checkCampaignEnergy: getSaveVal('db_nrg', true),
-                        autoRun: true
-                    }, false);
+        // Start the sequence 5 seconds after initialization
+        setTimeout(() => {
+            executeAutoCheckTick(); // 1st attempt
 
-                } catch (err) {
-                    console.warn(`[HWH Dashboard] Auto-run attempt ${autoRunAttempts + 1} failed (API not ready). Retrying...`);
+            autoRunInterval = setInterval(() => {
+                autoRunAttempts++;
+                if (autoRunAttempts >= 5) {
+                    clearInterval(autoRunInterval); // Stop after 5 additional attempts
                 }
-            };
+                executeAutoCheckTick();
+            }, 2000); // 2 seconds between retries
 
-            // Start the sequence 5 seconds after initialization
-            setTimeout(() => {
-                executeAutoCheckTick(); // 1st attempt
-
-                autoRunInterval = setInterval(() => {
-                    autoRunAttempts++;
-                    if (autoRunAttempts >= 5) {
-                        clearInterval(autoRunInterval); // Stop after 5 additional attempts
-                    }
-                    executeAutoCheckTick();
-                }, 2000); // 2 seconds between retries
-
-            }, 5000);
-        }
+        }, 5000);
     }
 })();
